@@ -1,72 +1,111 @@
+from flask import Flask, render_template, request, send_file, session, flash, redirect, url_for
 import os
-import tempfile
-from flask import Flask, request, render_template, send_file
 import pandas as pd
+import re
 from werkzeug.utils import secure_filename
+from config import columns, widths
 
 app = Flask(__name__)
+app.secret_key = '1030d253-f896-45a8-aed9-dae5cd9d4834'  # Make sure to use a strong, random secret key in production
 
-ALLOWED_EXTENSIONS = {'txt'}
+UPLOAD_FOLDER = 'uploads'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
 
-column_widths = [2, 5, 12, 25, 4, 3, 2, 4, 6, 6, 15, 8, 8, 25, 20, 20, 3, 3, 1, 25, 20, 20, 3, 3, 1, 25, 25, 20, 2, 9, 25, 25, 20, 2, 9, 25, 25, 20, 2, 9, 8, 4, 8, 8, 6, 3, 3, 1, 3, 7, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 9, 15, 25, 20, 20, 3, 4, 25, 25, 20, 2, 9, 25, 20, 20, 3, 4, 25, 25, 20, 2, 9, 25, 20, 20, 3, 4, 25, 25, 20, 2, 9, 9, 1, 9, 4, 1, 1, 10, 1, 1, 2, 29, 6, 54, 10, 10, 10]
-
-def convert_to_csv(folder_path):
+def convert_to_csv(folder_path, widths, columns):
     all_dataframes = []
+    column_widths = widths
+    column_headers = columns
 
     for filename in os.listdir(folder_path):
         if filename.endswith(".txt"):
             file_path = os.path.join(folder_path, filename)
-            df = pd.read_fwf(file_path, widths=column_widths, header=None)
+            df = pd.read_fwf(file_path, widths=column_widths)
+            df.columns = column_headers
+            
+            c02 = df['PERC6'] == 'C02'
+            df = df[c02]
+            #### if you want double check file, turn this line on
+            # df['NOTES'] = os.path.splitext(filename)[0] 
+            
             all_dataframes.append(df)
 
     if not all_dataframes:
         raise ValueError("No DataFrames to concatenate. Please check the data source.")
 
     final_dataframe = pd.concat(all_dataframes, ignore_index=True)
+    final_dataframe = final_dataframe.fillna('')
+    final_dataframe.columns = column_headers
     return final_dataframe
 
 @app.route('/', methods=['GET', 'POST'])
-def upload_folder():
+def upload_file():
     if request.method == 'POST':
         if 'folder' not in request.files:
-            return 'No folder part'
-        folder = request.files.getlist('folder')
-        if not folder or folder[0].filename == '':
-            return 'No selected folder'
+            flash('No file part', 'error')
+            return redirect(request.url)
         
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for file in folder:
-                if file and allowed_file(file.filename):
-                    filename = secure_filename(file.filename)
-                    file.save(os.path.join(temp_dir, filename))
+        files = request.files.getlist('folder')
+        if not files or files[0].filename == '':
+            flash('No selected files', 'error')
+            return redirect(request.url)
+        
+        folder_path = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_folder')
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+        
+        years = []
+        file_names = []
+        for file in files:
+            if file and file.filename.endswith('.txt'):
+                filename = secure_filename(file.filename)
+                file.save(os.path.join(folder_path, filename))
+                file_names.append(filename)
+                match = re.search(r'(\d{4})', filename)
+                if match:
+                    year = int(match.group(1))
+                    years.append(year)
+        
+        try:
+            df = convert_to_csv(folder_path, widths=widths, columns=columns)
             
-            try:
-                df = convert_to_csv(temp_dir)
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as temp_output:
-                    output_path = temp_output.name
-                    df.to_csv(output_path, index=False, header=False)  # Save without headers
-                
-                return_value = send_file(
-                    output_path,
-                    as_attachment=True,
-                    download_name='output.csv',
-                    mimetype='text/csv'
-                )
-                
-                @return_value.call_on_close
-                def delete_file():
-                    os.remove(output_path)
-                
-                return return_value
+            min_year = min(years) if years else 0
+            max_year = max(years) if years else 0
+            output_filename = f"{min_year}-{max_year} Edge Gap Billing_{len(df)}.csv"
+            output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+            df.to_csv(output_path, index=False, header=False)  ### set False if don't need file header
             
-            except Exception as e:
-                return str(e)
+            # Clean up temporary folder
+            for file in os.listdir(folder_path):
+                os.remove(os.path.join(folder_path, file))
+            os.rmdir(folder_path)
+            
+            session['file_names'] = file_names
+            session['output_filename'] = output_filename
+            
+            flash('Conversion successful!', 'success')
+            return redirect(url_for('upload_file'))
+        
+        except Exception as e:
+            flash(f'An error occurred: {str(e)}', 'error')
+            return redirect(url_for('upload_file'))
     
-    return render_template('upload.html')
+    return render_template('upload.html', 
+                           file_names=session.get('file_names'), 
+                           output_filename=session.get('output_filename'))
+
+@app.route('/download')
+def download_file():
+    output_filename = session.get('output_filename')
+    if output_filename:
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+        return send_file(output_path, as_attachment=True)
+    else:
+        flash('No file to download', 'error')
+        return redirect(url_for('upload_file'))
 
 if __name__ == '__main__':
     app.run(debug=True)
