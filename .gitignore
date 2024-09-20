@@ -1,4 +1,5 @@
 # Ignore virtual environment and cache files
 venv/
 __pycache__/
+uploads/
 *.csv

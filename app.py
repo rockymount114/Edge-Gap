@@ -26,7 +26,7 @@ def convert_to_csv(folder_path, widths, columns):
             df = pd.read_fwf(file_path, widths=column_widths)
             df.columns = column_headers
             
-            c02 = df['PERC6'] == 'C02'
+            c02 = df['PERC6'] == 'C02' #filter out C02 district for the City of Rocky Mount
             df = df[c02]
             #### if you want double check file, turn this line on
             # df['NOTES'] = os.path.splitext(filename)[0] 
@@ -95,7 +95,7 @@ def upload_file():
     
     return render_template('upload.html', 
                            file_names=session.get('file_names'), 
-                           output_filename=session.get('output_filename'))
+                           output_filename=session.get('output_filename'))  
 
 @app.route('/download')
 def download_file():
@@ -108,4 +108,4 @@ def download_file():
         return redirect(url_for('upload_file'))
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
